@@ -1,0 +1,234 @@
+use super::ast;
+use super::spans;
+
+
+grammar(ctx: &mut spans::SpanMaker<'input>);
+
+Ident: String = <r"[a-z_]\w*"> => String::from(<>);
+
+IntLiteral: String = {
+    r"(?:0|[1-9][0-9]*)" => String::from(<>),
+};
+FloatLiteral: String =
+    r"(?:0|[1-9][0-9]*)\.[0-9]*(?:[eE]-?[0-9]+)?" => String::from(<>);
+
+Readability: ast::Readability = {
+    "<readonly>" => ast::Readability::ReadOnly,
+    "<writeonly>" => ast::Readability::WriteOnly,
+}
+
+Call: Box<ast::Expr> = {
+    Spanned<("$" <Ident> "(" <SepList<Expr, ",">> ")")> => {
+        let ((what, args), span) = <>;
+        Box::new(ast::Expr::Call(what, args, span))
+    }
+}
+
+SepList<T, Sep>: Vec<T> = {
+    <mut v:(<T> Sep)*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+Spanned<T>: spans::Spanned<T> = {
+    <l: @L> <val: T> <r: @R> => (val, ctx.span(l, r))
+};
+
+LeftAssociative<Op,NextTier>: Box<ast::Expr> = {
+    Spanned<(Spanned<LeftAssociative<Op,NextTier>> Op Spanned<NextTier>)> => {
+        let ((lhs, op, rhs), span) = <>;
+        Box::new(ast::Expr::BinOp(lhs, rhs, op, span))
+    },
+    NextTier,
+};
+
+
+PotOp: ast::Op = {
+    "^" => ast::Op::Pot,
+};
+UnOp: ast::UnOp = {
+    "-" => ast::UnOp::Minus,
+    "#" => ast::UnOp::Len,
+    "not" => ast::UnOp::Not,
+    "~" => ast::UnOp::BitNot,
+};
+MultOp: ast::Op = {
+    "*" => ast::Op::Mult,
+    "/" => ast::Op::Div,
+    "//" => ast::Op::IntDiv,
+    "%" => ast::Op::Rem,
+};
+AddOp: ast::Op = {
+    "+" => ast::Op::Add,
+    "-" => ast::Op::Sub,
+};
+BitShiftOp: ast::Op = {
+    "<<" => ast::Op::BitLsh,
+    ">>" => ast::Op::BitRsh,
+};
+BitAndOp: ast::Op = {
+    "&" => ast::Op::BitAnd,
+};
+BitXorOp: ast::Op = {
+    "~" => ast::Op::Or,
+};
+BitOrOp: ast::Op = {
+    "|" => ast::Op::BitOr,
+};
+CmpOp: ast::Op = {
+    "<" => ast::Op::Lt,
+    "<=" => ast::Op::Lte,
+    ">" => ast::Op::Gt,
+    ">=" => ast::Op::Gte,
+    "==" => ast::Op::Eq,
+    "~=" => ast::Op::Neq,
+};
+AndOp: ast::Op = {
+    "and" => ast::Op::And,
+};
+OrOp: ast::Op = {
+    "or" => ast::Op::Or,
+};
+
+VarOrLiteral: Box<ast::Expr> = {
+    Spanned<Ident> => Box::new(
+        match <>.0.as_str() {
+            "false" | "true" => ast::Expr::Literal(ast::Literal::Bool, <>),
+            "nil" => ast::Expr::Literal(ast::Literal::Nil, <>),
+            _ => ast::Expr::Variable(<>)
+        }
+    ),
+
+    Spanned<IntLiteral> => Box::new(ast::Expr::Literal(ast::Literal::Int, <>)),
+    Spanned<FloatLiteral> => Box::new(ast::Expr::Literal(ast::Literal::Float, <>)),
+}
+
+LiteralArray: Box<ast::Expr> = {
+    Spanned<("[" <SepList<Expr, ",">> "]")> => Box::new(ast::Expr::LiteralArray(<>))
+};
+
+RepeatedArray: Box<ast::Expr> = {
+    Spanned<("[" <Expr> ";" <IntLiteral> "]")> => Box::new(ast::Expr::RepeatedArray(<>))
+};
+
+ArrayAccess: Box<ast::Expr> = {
+    <lhs: SimpleExpr> <rhs: Spanned<("[" <Expr> "]")>> => Box::new(ast::Expr::ArrayAccess(lhs, rhs.0, rhs.1))
+};
+
+RecordSub = "{" <SepList<(<Spanned<Ident>> "=" <Expr>), ",">> "}";
+
+RecordDef: Box<ast::Expr> = {
+    Spanned<RecordSub> => Box::new(ast::Expr::Record(<>.0, <>.1))
+};
+
+FieldAccess: Box<ast::Expr> = {
+    <lhs: SimpleExpr> <rhs: Spanned<("." <Ident>)>> => Box::new(ast::Expr::FieldAccess(lhs, rhs.0, rhs.1))
+};
+
+SimpleExpr = {
+    VarOrLiteral,
+    LiteralArray,
+    RepeatedArray,
+    RecordDef,
+    FieldAccess,
+    ArrayAccess,
+
+    "(" <Expr> ")",
+}
+
+CallExpr = {
+    SimpleExpr,
+    Call,
+}
+PotExpr: Box<ast::Expr> = {
+    Spanned<(Spanned<CallExpr> PotOp Spanned<PotExpr>)> => {
+        let ((lhs, op, rhs), span) = <>;
+        Box::new(ast::Expr::BinOp(lhs, rhs, op, span))
+    },
+    CallExpr,
+};
+UnaryExpr: Box<ast::Expr> = {
+    Spanned<(UnOp Spanned<UnaryExpr>)> => {
+        let ((op, expr), span) = <>;
+        Box::new(ast::Expr::UnOp(expr, op, span))
+    },
+    PotExpr,
+};
+MultExpr = LeftAssociative<MultOp, UnaryExpr>;
+AddExpr = LeftAssociative<AddOp, MultExpr>;
+BitShiftExpr = LeftAssociative<BitShiftOp, AddExpr>;
+BitAndExpr = LeftAssociative<BitAndOp, BitShiftExpr>;
+BitXorExpr = LeftAssociative<BitXorOp, BitAndExpr>;
+BitOrExpr = LeftAssociative<BitOrOp, BitXorExpr>;
+CmpExpr = LeftAssociative<CmpOp, BitOrExpr>;
+AndExpr = LeftAssociative<AndOp, CmpExpr>;
+OrExpr = LeftAssociative<OrOp, AndExpr>;
+Expr = {
+    OrExpr,
+    If,
+};
+
+TypeExpr: Box<ast::TypeExpr> = {
+    Spanned<Ident> => Box::new(ast::TypeExpr::Ident(<>)),
+};
+
+CoreIf: Box<ast::Expr> = {
+    <t:Spanned<Expr>> "then" <b:Block> "elseif" <e:CoreIf> => Box::new(ast::Expr::If(t, b, Some(ast::TopLevel::Expr(e)))),
+    <Spanned<Expr>> "then" <Block> <("else" <Block>)?> "end" => Box::new(ast::Expr::If(<>)),
+};
+
+If: Box<ast::Expr> = {
+    "if" <CoreIf>
+};
+
+LetStatement: ast::TopLevel = {
+    "let" <Ident> <Spanned<Readability>?> <(":" <Spanned<TypeExpr>>)?> "=" <Expr> => ast::TopLevel::LetDef(<>),
+};
+
+Assignment: ast::TopLevel = {
+    <Spanned<Ident>> "=" <Spanned<Expr>> => ast::TopLevel::Assign(<>)
+};
+
+Statement: ast::TopLevel = {
+    LetStatement,
+    Assignment,
+    Expr => ast::TopLevel::Expr(<>),
+    "do" <Block> "end",
+};
+
+ColonType = {
+    ":" <TypeExpr>
+}
+
+FuncDef: ast::TopLevel = {
+    Spanned<("function" "$" <Ident> "(" <SepList<Spanned<(Ident ColonType?)>, ",">> ")" <Block> "end")> => {
+        let ((name, arguments, block), span) = <>;
+        ast::TopLevel::FuncDef(((name, arguments, Box::new(block)), span))
+    }
+};
+
+Block: ast::TopLevel = {
+    <(<Statement> ";")*> <(<Spanned<Expr>>)?> => ast::TopLevel::Block(<>)
+};
+
+ChunkParts = {
+    Statement,
+    FuncDef,
+}
+
+pub Chunk: ast::TopLevel = {
+   SepList<ChunkParts, ";"> => ast::TopLevel::Block(<>, None)
+};
+
+// This ignores errors, but panics
+match {
+    r"\s*" => { }, // whitespace skipping
+    r"--[^\n\r]*[\n\r]*" => { }, // Skip `-- comments`
+    // --[[]] comments would rewuire backtracking
+} else {
+    _
+}

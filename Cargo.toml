@@ -1,0 +1,16 @@
+[package]
+name = "fdl"
+description = "Fast deterministic language - A fast"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+fixed_point = []
+
+[build-dependencies]
+lalrpop = "0.20.0"
+
+[dependencies]
+lalrpop-util = {version = "0.20", features = ["lexer"]}
+thiserror = "1.0.40"

@@ -1,0 +1,6 @@
+[book]
+authors = ["Fabian Wunsch"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Fast Deterministic Language"
