@@ -1,0 +1,40 @@
+function $test(b: bounded<0..10>, c: nonzero<2..2>) -> bounded<0..5>
+    let b: [[bounded<0..10>; 5]; 2] = [[b;5];2];
+    b[0][8//2]//c
+end;
+
+function $gen_obj(val: int) -> {name: {first: int, second: int?}, other: _}
+    {
+        name = {
+            first = val,
+            second = nil,
+        },
+        other = val,
+    }
+end;
+
+function $tast(a: bounded<1..>, b: bounded<..-1>) -> bounded<..0>
+    a // b
+end;
+
+function $abc(a: float) -> float
+    let b: float = a;
+    b
+end;
+
+function $use_obj() -> int
+    let {name: {first: int}, other} = $gen_obj(1);
+    name.first
+end;
+
+function $test_len(a: _) -> bounded<0..6>
+    let b = [nil;6];
+    #b
+end;
+
+function $testt() -> int?
+end;
+
+function $main() -> int
+    $test(1, 2)
+end

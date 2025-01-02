@@ -1,125 +1,27 @@
-use std::collections::HashMap;
-use std::error;
-use std::fmt;
-use std::ops::Range;
+use std::collections::{HashMap, HashSet};
 
 use super::reachability;
+use super::set::Set;
 use crate::parser::spans::{Span, SpannedError as TypeError};
 
 type ID = usize;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Value(ID);
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Use(ID);
 
 pub type LazyFlow = (Value, Use);
 
-#[derive(Clone, Debug)]
-pub struct Bound {
-    bounds: Vec<(i128, i128)>,
-}
-
-impl Default for Bound {
-    fn default() -> Self {
-        Bound { bounds: Vec::new() }
-    }
-}
-
-impl Bound {
-    pub fn from_number(number: i128) -> Bound {
-        Bound {
-            bounds: vec![(number, number)]
-        }
-    }
-
-    pub fn from_range(range: Range<i128>) -> Bound {
-        Bound {
-            bounds: vec![(*range.start(), *range.end())]
-        }
-    }
-
-    pub fn merge(mut self) -> Bound {
-        let mut ranges = self.bounds;
-        ranges.sort_by_key(|(_, i)| i);
-        let mut result = Vec::new();
-        if let Some((mut prev_start, mut prev_end)) = ranges.pop() {
-            while let Some((start, end)) = ranges.pop() {
-                if end >= prev_start {
-                    prev_start = prev_start.min(start)
-                } else {
-                    result.push((prev_start, prev_end));
-                    prev_start = start;
-                    prev_end = end;
-                }
-            }
-            result.push((prev_start, prev_end));
-        }
-        self.bounds = result;
-        self
-    }
-
-    pub fn add(&self, other: &Bound) -> Bound {
-        let mut new = self.clone();
-        new.bounds = new
-            .bounds
-            .into_iter()
-            .flat_map(|(start, end)| {
-                other
-                    .bounds
-                    .iter()
-                    .map(|&(other_start, other_end)| (start + other_start, end + other_end))
-                    .collect()
-            })
-            .collect();
-        new.merge()
-    }
-
-    pub fn sub(&self, other: &Bound) -> Bound {
-        let mut new_other = other.clone();
-        new_other.bounds = new_other
-            .bounds
-            .into_iter()
-            .map(|(start, end)| (-end, -start))
-            .collect();
-        self.add(&new_other)
-    }
-
-    pub fn contains(&self, other: &Bound) -> bool {
-        let mut own_ranges = self.bounds.clone();
-        let mut other_ranges = other.bounds.clone();
-        own_ranges.sort_unstable_by_key(|(i, _)| i);
-        other_ranges.sort_unstable_by_key(|(i, _)| i);
-
-        let mut i = 0;
-        let mut j = 0;
-
-        while i < other_ranges.len() && j < own_ranges.len() {
-            let (other_start, other_end) = other_ranges[i];
-            let (own_start, own_end) = own_ranges[j];
-
-            if other_start >= own_start && other_end <= other_end {
-                i += 1;
-            } else {
-                j += 1;
-            }
-        }
-
-        i == other_ranges.len()
-    }
-}
-
-#[derive(Debug, Clone)]
-enum VTypeHead {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VTypeHead {
     VBool,
     VFloat,
-    VUnboundedInt,
-    VBoundedInt(Bound),
     VNull,
     VStr,
     VIntOrFloat,
     VFunc {
-        arg: Use,
+        arg: Vec<Use>,
         ret: Value,
     },
     VObj {
@@ -133,18 +35,25 @@ enum VTypeHead {
         write: Option<Use>,
         read: Option<Value>,
     },
+    VArray {
+        value: Value,
+        index: Use,
+        len: Value,
+    },
+    VBoundedInt {
+        set: Set,
+    },
 }
-#[derive(Debug, Clone)]
-enum UTypeHead {
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UTypeHead {
     UBool,
     UFloat,
-    UUnboundedInt,
-    UBoundedInt(Bound),
     UNull,
     UStr,
     UIntOrFloat,
     UFunc {
-        arg: Value,
+        arg: Vec<Value>,
         ret: Use,
     },
     UObj {
@@ -161,6 +70,20 @@ enum UTypeHead {
     UNullCase {
         nonnull: Use,
     },
+    UArray {
+        value: Use,
+        len: Use,
+    },
+    UArrayAccess {
+        value: Use,
+        index: Value,
+    },
+    UArrayLen {
+        length: Use,
+    },
+    UBoundedInt {
+        set: Set,
+    },
 }
 
 fn check_heads(
@@ -176,26 +99,30 @@ fn check_heads(
     match (&lhs.0, &rhs.0) {
         (&VBool, &UBool) => Ok(()),
         (&VFloat, &UFloat) => Ok(()),
-        (&VUnboundedInt, &UUnboundedInt) => Ok(()),
         (&VNull, &UNull) => Ok(()),
         (&VStr, &UStr) => Ok(()),
-        (&VUnboundedInt, &UIntOrFloat) => Ok(()),
         (&VFloat, &UIntOrFloat) => Ok(()),
         (&VIntOrFloat, &UIntOrFloat) => Ok(()),
+        (&VBoundedInt { .. }, &UIntOrFloat) => Ok(()),
 
         (
-            &VFunc {
+            VFunc {
                 arg: arg1,
                 ret: ret1,
             },
-            &UFunc {
+            UFunc {
                 arg: arg2,
                 ret: ret2,
             },
         ) => {
-            out.push((ret1, ret2));
+            out.push((*ret1, *ret2));
             // flip the order since arguments are contravariant
-            out.push((arg2, arg1));
+            if arg1.len() != arg2.len() {
+                return Err(TypeError::new2("TypeError: Function called with invalid argument number\nNote: Arguments defined here", lhs.1, "And used here", rhs.1));
+            }
+            for (arg2, arg1) in arg2.iter().zip(arg1) {
+                out.push((*arg2, *arg1));
+            }
             Ok(())
         }
         (
@@ -216,10 +143,7 @@ fn check_heads(
                 Ok(())
             } else {
                 Err(TypeError::new2(
-                    format!(
-                        "TypeError: Missing field {}\nNote: Field is accessed here",
-                        name
-                    ),
+                    format!("TypeError: Missing field {name}\nNote: Field is accessed here"),
                     rhs.1,
                     "But the record is defined without that field here.",
                     lhs.1,
@@ -246,10 +170,7 @@ fn check_heads(
                 Ok(())
             } else {
                 Err(TypeError::new2(
-                    format!(
-                        "TypeError: Unhandled case {}\nNote: Case originates here",
-                        name
-                    ),
+                    format!("TypeError: Unhandled case {name}\nNote: Case originates here"),
                     lhs.1,
                     "But it is not handled here.",
                     rhs.1,
@@ -295,37 +216,89 @@ fn check_heads(
             Ok(())
         }
 
+        (
+            &VArray {
+                value: a_value,
+                len: a_len,
+                ..
+            },
+            &UArray {
+                value: b_value,
+                len: b_len,
+            },
+        ) => {
+            out.push((a_value, b_value));
+            out.push((a_len, b_len));
+            Ok(())
+        }
+
+        (
+            &VArray {
+                value,
+                index: a_index,
+                ..
+            },
+            &UArrayAccess { value: used, index },
+        ) => {
+            out.push((index, a_index));
+            out.push((value, used));
+            Ok(())
+        }
+        (&VArray { len, .. }, &UArrayLen { length }) => {
+            out.push((len, length));
+            Ok(())
+        }
+
         (&VNull, &UNullCase { .. }) => Ok(()),
         (_, &UNullCase { nonnull }) => {
             out.push((Value(lhs_ind), nonnull));
             Ok(())
         }
+        (VBoundedInt { set: v_set }, UBoundedInt { set: u_set }) => {
+            if v_set.is_subset(u_set) {
+                Ok(())
+            } else {
+                Err(TypeError::new2(
+                    format!(
+                        "TypeError: integer bounds not satisfied.\nExpected integer {}",
+                        u_set.format()
+                    ),
+                    rhs.1,
+                    format!("But found integer {} here.", v_set.format()),
+                    lhs.1,
+                ))
+            }
+        }
 
         _ => {
-            let found = match lhs.0 {
-                VBool => "boolean",
-                VFloat => "float",
-                VUnboundedInt => "integer",
-                VNull => "null",
-                VStr => "string",
-                VIntOrFloat => "float or integer",
-                VFunc { .. } => "function",
-                VObj { .. } => "record",
-                VCase { .. } => "case",
-                VRef { .. } => "ref",
+            let found = match &lhs.0 {
+                VBool => "boolean".to_string(),
+                VFloat => "float".to_string(),
+                VNull => "nil".to_string(),
+                VStr => "string".to_string(),
+                VIntOrFloat => "float or integer".to_string(),
+                VFunc { .. } => "function".to_string(),
+                VObj { .. } => "record".to_string(),
+                VCase { .. } => "case".to_string(),
+                VRef { .. } => "ref".to_string(),
+                VArray { .. } => "array".to_string(),
+                VBoundedInt { set } => format!("integer {}", set.format()),
             };
-            let expected = match rhs.0 {
-                UBool => "boolean",
-                UFloat => "float",
-                UUnboundedInt => "integer",
-                UNull => "null",
-                UStr => "string",
-                UIntOrFloat => "float or integer",
-                UFunc { .. } => "function",
-                UObj { .. } => "record",
-                UCase { .. } => "case",
-                URef { .. } => "ref",
+            let expected = match &rhs.0 {
+                UBool => "boolean".to_string(),
+                UFloat => "float".to_string(),
+                UNull => "nil".to_string(),
+                UStr => "string".to_string(),
+                UIntOrFloat => "float or integer".to_string(),
+                UFunc { .. } => "function".to_string(),
+                UObj { .. } => "record".to_string(),
+                UCase { .. } => "case".to_string(),
+                URef { .. } => "ref".to_string(),
                 UNullCase { .. } => unreachable!(),
+                UArray { .. } => "array".to_string(),
+                UArrayAccess { .. } => "array access".to_string(),
+                UArrayLen { .. } => "array len".to_string(),
+                UBoundedInt { set } => format!("integer {}", set.format()),
             };
 
             Err(TypeError::new2(
@@ -376,6 +349,14 @@ impl TypeCheckerCore {
         Ok(())
     }
 
+    pub fn debug_value(&self, value: &Value) {
+        println!("Type of {value:?}: {:?}", self.types[value.0])
+    }
+
+    pub fn debug_use(&self, use_: &Use) {
+        println!("Type of {use_:?}: {:?}", self.types[use_.0])
+    }
+
     fn new_val(&mut self, val_type: VTypeHead, span: Span) -> Value {
         let i = self.r.add_node();
         assert_eq!(i, self.types.len());
@@ -397,6 +378,53 @@ impl TypeCheckerCore {
         (Value(i), Use(i))
     }
 
+    fn resolve_var(&self, id: ID) -> Vec<TypeNode> {
+        let mut visited = HashSet::new();
+        visited.insert(id);
+        let mut to_search = vec![id];
+        let mut results = Vec::new();
+        while let Some(id) = to_search.pop() {
+            for edge in self.r.get_edge(id) {
+                visited.insert(*edge);
+                match &self.types[*edge] {
+                    TypeNode::Var => to_search.push(*edge),
+                    val => results.push(val.clone()),
+                }
+            }
+        }
+        results
+    }
+
+    pub fn get_value(&self, value: Value) -> Vec<VTypeHead> {
+        match &self.types[value.0] {
+            TypeNode::Value((val, _)) => vec![val.clone()],
+            TypeNode::Var => self
+                .resolve_var(value.0)
+                .into_iter()
+                .map(|val| {
+                    if let TypeNode::Value((val, _)) = val {
+                        val
+                    } else {
+                        panic!("inconsistent types, got {val:?}")
+                    }
+                })
+                .collect(),
+            TypeNode::Use(_) => {
+                panic!("Inconsistent types")
+            }
+        }
+    }
+
+    pub fn get_use(&self, use_: Use) -> UTypeHead {
+        match &self.types[use_.0] {
+            TypeNode::Use((use_, _)) => use_.clone(),
+            TypeNode::Var => UTypeHead::UNull,
+            TypeNode::Value(_) => {
+                panic!("Inconsistent types")
+            }
+        }
+    }
+
     pub fn bool(&mut self, span: Span) -> Value {
         self.new_val(VTypeHead::VBool, span)
     }
@@ -404,7 +432,10 @@ impl TypeCheckerCore {
         self.new_val(VTypeHead::VFloat, span)
     }
     pub fn int(&mut self, span: Span) -> Value {
-        self.new_val(VTypeHead::VUnboundedInt, span)
+        self.bounded_int(Set::new(i64::MIN..=i64::MAX), span)
+    }
+    pub fn bounded_int(&mut self, set: Set, span: Span) -> Value {
+        self.new_val(VTypeHead::VBoundedInt { set }, span)
     }
     pub fn null(&mut self, span: Span) -> Value {
         self.new_val(VTypeHead::VNull, span)
@@ -423,7 +454,10 @@ impl TypeCheckerCore {
         self.new_use(UTypeHead::UFloat, span)
     }
     pub fn int_use(&mut self, span: Span) -> Use {
-        self.new_use(UTypeHead::UUnboundedInt, span)
+        self.bounded_int_use(Set::new(i64::MIN..=i64::MAX), span)
+    }
+    pub fn bounded_int_use(&mut self, set: Set, span: Span) -> Use {
+        self.new_use(UTypeHead::UBoundedInt { set }, span)
     }
     pub fn null_use(&mut self, span: Span) -> Use {
         self.new_use(UTypeHead::UNull, span)
@@ -435,10 +469,10 @@ impl TypeCheckerCore {
         self.new_use(UTypeHead::UIntOrFloat, span)
     }
 
-    pub fn func(&mut self, arg: Use, ret: Value, span: Span) -> Value {
+    pub fn func(&mut self, arg: Vec<Use>, ret: Value, span: Span) -> Value {
         self.new_val(VTypeHead::VFunc { arg, ret }, span)
     }
-    pub fn func_use(&mut self, arg: Value, ret: Use, span: Span) -> Use {
+    pub fn func_use(&mut self, arg: Vec<Value>, ret: Use, span: Span) -> Use {
         self.new_use(UTypeHead::UFunc { arg, ret }, span)
     }
 
@@ -448,6 +482,22 @@ impl TypeCheckerCore {
     }
     pub fn obj_use(&mut self, field: (String, Use), span: Span) -> Use {
         self.new_use(UTypeHead::UObj { field }, span)
+    }
+
+    pub fn array(&mut self, value: Value, len: i64, span: Span) -> Value {
+        let index = self.bounded_int_use(Set::new(0..=len - 1), span);
+        let len = self.bounded_int(Set::new(len..=len), span);
+        self.new_val(VTypeHead::VArray { value, index, len }, span)
+    }
+    pub fn array_use(&mut self, value: Use, length: i64, span: Span) -> Use {
+        let len = self.bounded_int_use(Set::new(length..=length), span);
+        self.new_use(UTypeHead::UArray { value, len }, span)
+    }
+    pub fn array_access(&mut self, value: Use, index: Value, span: Span) -> Use {
+        self.new_use(UTypeHead::UArrayAccess { value, index }, span)
+    }
+    pub fn array_length(&mut self, length: Use, span: Span) -> Use {
+        self.new_use(UTypeHead::UArrayLen { length }, span)
     }
 
     pub fn case(&mut self, case: (String, Value), span: Span) -> Value {

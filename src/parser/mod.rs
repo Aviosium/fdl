@@ -36,7 +36,7 @@ fn convert_parse_error<T: Display>(
         ParseError::ExtraToken { token } => {
             SpannedError::new1("SyntaxError: Unexpected extra token", sm.span(token.0, token.2))
         }
-        ParseError::User { error: msg } => unreachable!(),
+        ParseError::User { error: _msg } => unreachable!(),
     }
 }
 
@@ -53,23 +53,28 @@ impl Parser {
         }
     }
 
-    pub fn parse(
-        &mut self,
-        source_path: &str,
-        content: &str,
-    ) -> Result<ast::TopLevel, SpannedError> {
-        let mut span_maker = self.spans.add_source(source_path.to_string());
+    pub fn parse(&mut self, content: &str) -> Result<ast::TopLevel, SpannedError> {
+        let mut span_maker = self.spans.add_source(content.to_string());
 
         self.parser
             .parse(&mut span_maker, content)
             .map_err(|e| convert_parse_error(span_maker, e))
+    }
+
+    pub fn get_manager(&self) -> &SpanManager {
+        &self.spans
+    }
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::spans::SpanManager;
 
     #[test]
     fn test_basic_script() {
@@ -93,6 +98,6 @@ mod tests {
                 c
             end;";
         let mut parser = Parser::new();
-        let ast = parser.parse("temp", script).unwrap();
+        let _ast = parser.parse(script).unwrap();
     }
 }

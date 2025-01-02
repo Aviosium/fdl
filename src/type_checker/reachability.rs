@@ -55,6 +55,10 @@ impl Reachability {
             }
         }
     }
+
+    pub fn get_edge(&self, edge: ID) -> &Vec<ID> {
+        &self.upsets[edge].v
+    }
 }
 
 #[cfg(test)]
@@ -64,7 +68,7 @@ mod tests {
     #[test]
     fn test() {
         let mut r = Reachability::default();
-        for i in 0..10 {
+        for _ in 0..10 {
             r.add_node();
         }
 

@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0"
 repository = "https://github.com/Aviosium/fdl"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
@@ -14,5 +15,5 @@ fixed_point = []
 lalrpop = "0.20.0"
 
 [dependencies]
-lalrpop-util = {version = "0.20", features = ["lexer"]}
+lalrpop-util = { version = "0.20", features = ["lexer"] }
 thiserror = "1.0.40"

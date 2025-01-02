@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error;
 use std::fmt;
 
@@ -62,8 +62,9 @@ impl SpanManager {
 
         // highlight line
         out += &" ".repeat(line_before.len());
-        out += "^";
+        out += "\x1b[1;31m^\x1b[1;33m";
         out += &"~".repeat(std::cmp::max(1, tok.len()) - 1);
+        out += "\x1b[0m";
         out += &" ".repeat(line_after.len());
         out += "\n";
 
@@ -127,7 +128,17 @@ impl SpannedError {
     pub fn print(&self, sm: &SpanManager) -> String {
         let mut out = String::new();
         for (msg, span) in self.pairs.iter() {
-            out += &msg;
+            if msg.contains("Error:") {
+                out += "\x1b[1;31m";
+                let mut parts = msg.splitn(2, ':');
+                out += parts.next().unwrap();
+                out += ":\x1b[0m";
+                if let Some(part) = parts.next() {
+                    out += part
+                }
+            } else {
+                out += msg;
+            }
             out += "\n";
             out += &sm.print(*span);
         }
@@ -135,7 +146,7 @@ impl SpannedError {
     }
 }
 impl fmt::Display for SpannedError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, _f: &mut fmt::Formatter) -> fmt::Result {
         Ok(())
     }
 }

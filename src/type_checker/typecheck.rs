@@ -1,44 +1,34 @@
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::error;
-use std::fmt;
-use std::rc::Rc;
+use std::collections::HashMap;
 
 use super::core::*;
+use super::set::Set;
 use crate::parser::ast;
 use crate::parser::spans::{Span, SpannedError as SyntaxError};
 
-type Result<T> = std::result::Result<T, SyntaxError>;
+pub type Result<T> = std::result::Result<T, SyntaxError>;
 
-#[derive(Clone)]
-enum Scheme {
-    Mono(Value),
-    Poly(Rc<dyn Fn(&mut TypeCheckerCore) -> Result<Value>>),
+pub struct Bindings {
+    m: HashMap<String, Value>,
+    changes: Vec<(String, Option<Value>)>,
+    functions: HashMap<String, Value>,
 }
 
-struct Bindings {
-    m: HashMap<String, Scheme>,
-    changes: Vec<(String, Option<Scheme>)>,
-}
 impl Bindings {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             m: HashMap::new(),
             changes: Vec::new(),
+            functions: HashMap::new(),
         }
     }
 
-    fn get(&self, k: &str) -> Option<&Scheme> {
+    fn get(&self, k: &str) -> Option<&Value> {
         self.m.get(k)
     }
 
-    fn insert_scheme(&mut self, k: String, v: Scheme) {
+    fn insert(&mut self, k: String, v: Value) {
         let old = self.m.insert(k.clone(), v);
         self.changes.push((k, old));
-    }
-
-    fn insert(&mut self, k: String, v: Value) {
-        self.insert_scheme(k, Scheme::Mono(v))
     }
 
     fn unwind(&mut self, n: usize) {
@@ -110,19 +100,11 @@ fn parse_type(
             let utype = engine.case_use(utype_case_arms, utype_wildcard, *span);
             Ok((vtype, utype))
         }
-        Func(((lhs, rhs), span)) => {
-            let lhs_type = parse_type(engine, bindings, lhs)?;
-            let rhs_type = parse_type(engine, bindings, rhs)?;
-
-            let utype = engine.func_use(lhs_type.0, rhs_type.1, *span);
-            let vtype = engine.func(lhs_type.1, rhs_type.0, *span);
-            Ok((vtype, utype))
-        }
         Ident((s, span)) => match s.as_str() {
             "bool" => Ok((engine.bool(*span), engine.bool_use(*span))),
             "float" => Ok((engine.float(*span), engine.float_use(*span))),
             "int" => Ok((engine.int(*span), engine.int_use(*span))),
-            "null" => Ok((engine.null(*span), engine.null_use(*span))),
+            "nil" => Ok((engine.null(*span), engine.null_use(*span))),
             "str" => Ok((engine.str(*span), engine.str_use(*span))),
             "number" => {
                 let (vtype, vtype_bound) = engine.var();
@@ -152,10 +134,33 @@ fn parse_type(
             }
             "_" => Ok(engine.var()),
             _ => Err(SyntaxError::new1(
-                "SyntaxError: Unrecognized simple type (choices are bool, float, int, str, number, null, top, bot, or _)",
+                "SyntaxError: Unrecognized simple type (choices are bool, float, int, str, number, nil, top, bot, or _)",
                 *span,
             )),
         },
+        BoundedInt(ranges,  span) => {
+            let mut set = Set::empty();
+            if ranges.is_empty() {
+                set.insert_and_merge(i64::MIN..=i64::MAX)
+            }
+            for (min, max) in ranges {
+                let min = min.as_ref().map(|(v, span)| {
+                    v.parse().map_err(|_| SyntaxError::new1("ValueError: integer out of bounds", *span))
+                }).transpose()?.unwrap_or(i64::MIN);
+                let max = max.as_ref().map(|(v, span)| {
+                    v.parse().map_err(|_| SyntaxError::new1("ValueError: integer out of bounds", *span))
+                }).transpose()?.unwrap_or(i64::MAX);
+                set.insert_and_merge(min..=max)
+            }
+            Ok((engine.bounded_int(set.clone(), *span), engine.bounded_int_use(set, *span)))
+        }
+        NonZero((v, span)) => {
+            let (_inner_value, inner_use) = parse_type(engine, bindings, v)?;
+            let inner_use = engine.get_use(inner_use);
+            let UTypeHead::UBoundedInt { mut set } = inner_use else { unreachable!("Unreachable via grammar")};
+            set.remove_int(0);
+            Ok((engine.bounded_int(set.clone(), *span), engine.bounded_int_use(set, *span)))
+        }
         Nullable(lhs, span) => {
             let lhs_type = parse_type(engine, bindings, lhs)?;
             let utype = engine.null_check_use(lhs_type.1, *span);
@@ -214,10 +219,17 @@ fn parse_type(
                 Ok(*res)
             } else {
                 Err(SyntaxError::new1(
-                    format!("SyntaxError: Undefined type variable {}", name),
+                    format!("ValueError: Undefined type variable {}", name),
                     *span,
                 ))
             }
+        }
+        Array(inner, count, span) => {
+            let count: i64 = count.parse().map_err(|_| SyntaxError::new1("ValueError: integer out of bounds", *span))?;
+            let (inner_v, inner_u) = parse_type(engine, bindings, inner)?;
+            let value = engine.array(inner_v, count, *span);
+            let use_ = engine.array_use(inner_u, count, *span);
+            Ok((value, use_))
         }
     }
 }
@@ -237,16 +249,22 @@ fn process_let_pattern(
 ) -> Result<Use> {
     use ast::LetPattern::*;
 
-    let (arg_type, arg_bound) = engine.var();
+    let (mut arg_type, arg_bound) = engine.var();
     match pat {
-        Var(name) => {
+        Var((name, _readability, type_)) => {
+            if let Some((type_, _span)) = type_ {
+                let (type_val, type_use) = parse_type_signature(engine, type_)?;
+                engine.flow(arg_type, type_use)?;
+                arg_type = type_val;
+            }
             bindings.insert(name.clone(), arg_type);
+            // todo!("readability, type");
         }
         Record(pairs) => {
             let mut field_names = HashMap::with_capacity(pairs.len());
 
-            for ((name, name_span), sub_pattern) in pairs {
-                if let Some(old_span) = field_names.insert(&*name, *name_span) {
+            for ((name, name_span), type_, sub_pattern) in pairs {
+                if let Some(old_span) = field_names.insert(name, *name_span) {
                     return Err(SyntaxError::new2(
                         "SyntaxError: Repeated field pattern name",
                         *name_span,
@@ -255,7 +273,11 @@ fn process_let_pattern(
                     ));
                 }
 
-                let field_bound = process_let_pattern(engine, bindings, &*sub_pattern)?;
+                let field_bound = process_let_pattern(engine, bindings, sub_pattern)?;
+                if let Some((type_, _type_span)) = type_ {
+                    let (type_val, _type_use) = parse_type_signature(engine, type_)?;
+                    engine.flow(type_val, field_bound)?;
+                }
                 let bound = engine.obj_use((name.clone(), field_bound), *name_span);
                 engine.flow(arg_type, bound)?;
             }
@@ -264,6 +286,37 @@ fn process_let_pattern(
     Ok(arg_bound)
 }
 
+fn merge_values(mut values: Vec<VTypeHead>) -> Option<VTypeHead> {
+    let mut result = values.pop()?;
+    for value in values {
+        if value == result {
+            continue;
+        } else if let (
+            VTypeHead::VBoundedInt { set: r_set },
+            VTypeHead::VBoundedInt { set: l_set },
+        ) = (&result, &value)
+        {
+            let mut set = r_set.clone();
+            set.merge(l_set);
+            result = VTypeHead::VBoundedInt { set }
+        } else {
+            return None;
+        }
+    }
+    Some(result)
+}
+
+fn new_bounds(
+    engine: &mut TypeCheckerCore,
+    full_span: &Span,
+    l_set: Set,
+    r_set: Set,
+    function: impl Fn(i64, i64) -> i64,
+) -> Result<Value> {
+    let min = function(l_set.min(), r_set.min());
+    let max = function(l_set.max(), r_set.max());
+    Ok(engine.bounded_int(Set::new(min..=max), *full_span))
+}
 fn check_expr(
     engine: &mut TypeCheckerCore,
     bindings: &mut Bindings,
@@ -276,60 +329,152 @@ fn check_expr(
             use ast::Op::*;
             let lhs_type = check_expr(engine, bindings, lhs_expr)?;
             let rhs_type = check_expr(engine, bindings, rhs_expr)?;
+            let lhs_type_head = merge_values(engine.get_value(lhs_type));
+            let rhs_type_head = merge_values(engine.get_value(rhs_type));
+            let bounded = if let (
+                Some(VTypeHead::VBoundedInt { set: l_set }),
+                Some(VTypeHead::VBoundedInt { set: r_set }),
+            ) = (lhs_type_head, rhs_type_head)
+            {
+                Some((l_set, r_set))
+            } else {
+                None
+            };
 
-            Ok(match op {
+            match op {
                 Div => {
                     let lhs_bound = engine.int_or_float_use(*lhs_span);
                     let rhs_bound = engine.int_or_float_use(*rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.float(*full_span)
+                    Ok(engine.float(*full_span))
                 }
                 IntDiv => {
-                    let lhs_bound = engine.int_or_float_use(*lhs_span);
-                    let rhs_bound = engine.int_or_float_use(*rhs_span);
+                    let lhs_bound = engine.int_use(*lhs_span);
+                    let mut rhs_bound = Set::new(i64::MIN..=-1);
+                    rhs_bound.insert_and_merge(1..=i64::MAX);
+                    let rhs_bound = engine.bounded_int_use(rhs_bound, *rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.int(*full_span)
+                    if let Some((l_set, r_set)) = bounded {
+                        let mut values = vec![
+                            l_set.min() / r_set.min(),
+                            l_set.min() / r_set.max(),
+                            l_set.max() / r_set.min(),
+                            l_set.max() / r_set.max(),
+                        ];
+                        if r_set.min() <= 1 && r_set.max() >= 1 {
+                            values.push(l_set.min());
+                            values.push(l_set.max());
+                        }
+                        if r_set.min() <= -1 && r_set.max() >= -1 {
+                            values.push(l_set.min() / -1);
+                            values.push(l_set.max() / -1);
+                        }
+                        Ok(engine.bounded_int(
+                            Set::new(*values.iter().min().unwrap()..=*values.iter().max().unwrap()),
+                            *full_span,
+                        ))
+                    } else {
+                        Ok(engine.int(*full_span))
+                    }
                 }
                 BitAnd | BitOr | BitLsh | BitRsh | BitXor => {
                     let lhs_bound = engine.int_use(*lhs_span);
                     let rhs_bound = engine.int_use(*rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.int(*full_span)
+                    Ok(engine.int(*full_span))
                 }
-                Add | Sub | Mult | Pot | Rem => {
+                Add | Sub | Mult | Pot => {
                     let lhs_bound = engine.int_or_float_use(*lhs_span);
                     let rhs_bound = engine.int_or_float_use(*rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.int_or_float(*full_span)
+                    if let Some((l_set, r_set)) = bounded {
+                        let op = match op {
+                            Add => |a, b| a + b,
+                            Sub => |a, b| a - b,
+                            Mult => |a, b| a * b,
+                            Pot => |a: i64, b| a.pow(b as u32),
+                            _ => unreachable!(),
+                        };
+                        new_bounds(engine, full_span, l_set, r_set, op)
+                    } else {
+                        Ok(engine.int_or_float(*full_span))
+                    }
+                }
+                Rem => {
+                    let lhs_bound = engine.int_or_float_use(*lhs_span);
+                    let rhs_bound = engine.int_or_float_use(*rhs_span);
+                    engine.flow(lhs_type, lhs_bound)?;
+                    engine.flow(rhs_type, rhs_bound)?;
+                    if let Some((_l_set, r_set)) = bounded {
+                        Ok(engine.bounded_int(Set::new(0..=r_set.max() - 1), *full_span))
+                    } else {
+                        Ok(engine.int_or_float(*full_span))
+                    }
                 }
                 Lt | Lte | Gt | Gte => {
                     let lhs_bound = engine.int_or_float_use(*lhs_span);
                     let rhs_bound = engine.int_or_float_use(*rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.bool(*full_span)
+                    Ok(engine.bool(*full_span))
                 }
                 And | Or => {
                     let lhs_bound = engine.bool_use(*lhs_span);
                     let rhs_bound = engine.bool_use(*rhs_span);
                     engine.flow(lhs_type, lhs_bound)?;
                     engine.flow(rhs_type, rhs_bound)?;
-                    engine.bool(*full_span)
+                    Ok(engine.bool(*full_span))
                 }
-                Eq | Neq => engine.bool(*full_span),
-            })
+                Eq | Neq => Ok(engine.bool(*full_span)),
+            }
+        }
+        UnOp((expr, expr_span), op, unop_span) => {
+            use ast::UnOp::*;
+            let expr_type = check_expr(engine, bindings, expr)?;
+
+            match op {
+                Minus => {
+                    let expr_bound = engine.int_or_float_use(*expr_span);
+                    engine.flow(expr_type, expr_bound)?;
+                    Ok(engine.int_or_float(*unop_span))
+                }
+                Len => {
+                    let (index_type, index_bound) = engine.var();
+                    let expr_bound = engine.array_length(index_bound, *expr_span);
+                    engine.flow(expr_type, expr_bound)?;
+                    Ok(index_type)
+                }
+                Not => {
+                    let expr_bound = engine.bool_use(*expr_span);
+                    engine.flow(expr_type, expr_bound)?;
+                    Ok(engine.bool(*unop_span))
+                }
+                BitNot => {
+                    let expr_bound = engine.int_use(*expr_span);
+                    engine.flow(expr_type, expr_bound)?;
+                    Ok(engine.int(*unop_span))
+                }
+            }
         }
         Call(func_expr, arg_expr, span) => {
-            let func_type = check_expr(engine, bindings, func_expr)?;
-            let arg_type = check_expr(engine, bindings, arg_expr)?;
+            let mut arguments = Vec::new();
+            for arg in arg_expr.clone() {
+                arguments.push(check_expr(engine, bindings, &arg)?);
+            }
 
             let (ret_type, ret_bound) = engine.var();
-            let bound = engine.func_use(arg_type, ret_bound, *span);
-            engine.flow(func_type, bound)?;
+            let bound = engine.func_use(arguments, ret_bound, *span);
+            let Some(func_type) = bindings.functions.get(func_expr) else {
+                return Err(SyntaxError::new1(
+                    format!("NameError: Undefined function {}", func_expr),
+                    *span,
+                ));
+            };
+            engine.flow(*func_type, bound)?;
             Ok(ret_type)
         }
         Case((tag, span), val_expr) => {
@@ -346,37 +491,39 @@ fn check_expr(
         }
         If((cond_expr, span), then_expr, else_expr) => {
             // Handle conditions of the form foo == null and foo != null specially
-            /*if let BinOp((lhs, _), (rhs, _), ast::OpType::AnyCmp, op, ..) = &**cond_expr {
+            if let BinOp((lhs, _), (rhs, _), op, ..) = &**cond_expr {
                 if let Variable((name, _)) = &**lhs {
-                    if let Literal(ast::Literal::Null, ..) = **rhs {
-                        if let Some(scheme) = bindings.get(name.as_str()) {
-                            if let Scheme::Mono(lhs_type) = scheme {
-                                // Flip order of branches if they wrote if foo == null instead of !=
-                                let (ok_expr, else_expr) = match op {
-                                    ast::Op::Neq => (then_expr, else_expr),
-                                    ast::Op::Eq => (else_expr, then_expr),
-                                    _ => unreachable!(),
-                                };
+                    if let Literal(ast::Literal::Nil, ..) = **rhs {
+                        if let Some(lhs_type) = bindings.get(name.as_str()) {
+                            // Flip order of branches if they wrote if foo == null instead of !=
+                            let (ok_expr, else_expr) = match op {
+                                ast::Op::Neq => {
+                                    (then_expr.clone(), else_expr.clone().unwrap_or_default())
+                                }
+                                ast::Op::Eq => {
+                                    (else_expr.clone().unwrap_or_default(), then_expr.clone())
+                                }
+                                _ => unreachable!(),
+                            };
 
-                                let (nnvar_type, nnvar_bound) = engine.var();
-                                let bound = engine.null_check_use(nnvar_bound, *span);
-                                engine.flow(*lhs_type, bound)?;
+                            let (nnvar_type, nnvar_bound) = engine.var();
+                            let bound = engine.null_check_use(nnvar_bound, *span);
+                            engine.flow(*lhs_type, bound)?;
 
-                                let ok_type = bindings.in_child_scope(|bindings| {
-                                    bindings.insert(name.clone(), nnvar_type);
-                                    check_expr(engine, bindings, ok_expr)
-                                })?;
-                                let else_type = check_expr(engine, bindings, else_expr)?;
+                            let ok_type = bindings.in_child_scope(|bindings| {
+                                bindings.insert(name.clone(), nnvar_type);
+                                check_toplevel(engine, bindings, &ok_expr)
+                            })?;
+                            let else_type = check_toplevel(engine, bindings, &else_expr)?;
 
-                                let (merged, merged_bound) = engine.var();
-                                engine.flow(ok_type, merged_bound)?;
-                                engine.flow(else_type, merged_bound)?;
-                                return Ok(merged);
-                            }
+                            let (merged, merged_bound) = engine.var();
+                            engine.flow(ok_type, merged_bound)?;
+                            engine.flow(else_type, merged_bound)?;
+                            return Ok(merged);
                         }
                     }
                 }
-            }*/
+            }
 
             let cond_type = check_expr(engine, bindings, cond_expr)?;
             let bound = engine.bool_use(*span);
@@ -399,7 +546,12 @@ fn check_expr(
             Ok(match type_ {
                 Bool => engine.bool(span),
                 Float => engine.float(span),
-                Int => engine.int(span),
+                Int => {
+                    let val = code.parse().map_err(|_| {
+                        SyntaxError::new1("ValueError: integer out of bounds", span)
+                    })?;
+                    engine.bounded_int(Set::new(val..=val), span)
+                }
                 Nil => engine.null(span),
             })
         }
@@ -428,7 +580,7 @@ fn check_expr(
                 use ast::MatchPattern::*;
                 match pattern {
                     Case(tag, name) => {
-                        if let Some(old_span) = case_names.insert(&*tag, *pattern_span) {
+                        if let Some(old_span) = case_names.insert(tag, *pattern_span) {
                             return Err(SyntaxError::new2(
                                 "SyntaxError: Unreachable match pattern",
                                 *pattern_span,
@@ -469,7 +621,7 @@ fn check_expr(
             let mut field_names = HashMap::with_capacity(fields.len());
             let mut field_type_pairs = Vec::with_capacity(fields.len());
             for ((name, name_span), expr) in fields {
-                if let Some(old_span) = field_names.insert(&*name, *name_span) {
+                if let Some(old_span) = field_names.insert(name, *name_span) {
                     return Err(SyntaxError::new2(
                         "SyntaxError: Repeated field name",
                         *name_span,
@@ -484,46 +636,64 @@ fn check_expr(
             Ok(engine.obj(field_type_pairs, None, *span))
         }
         Variable((name, span)) => {
-            if let Some(scheme) = bindings.get(name.as_str()) {
-                match scheme {
-                    Scheme::Mono(v) => Ok(*v),
-                    Scheme::Poly(cb) => cb(engine),
-                }
+            if let Some(v) = bindings.get(name.as_str()) {
+                Ok(*v)
             } else {
                 Err(SyntaxError::new1(
-                    format!("SyntaxError: Undefined variable {}", name),
+                    format!("NameError: Undefined variable {}", name),
                     *span,
                 ))
             }
         }
+        ArrayAccess(array, idx, span) => {
+            let array = check_expr(engine, bindings, array)?;
+            let idx = check_expr(engine, bindings, idx)?;
+            let (field_type, field_bound) = engine.var();
+            let bound = engine.array_access(field_bound, idx, *span);
+            engine.flow(array, bound)?;
+            Ok(field_type)
+        }
+        LiteralArray((entries, span)) => {
+            let (field_type, field_bound) = engine.var();
+            let len = entries.len() as i64;
+            for entry in entries {
+                let expr = check_expr(engine, bindings, entry)?;
+                engine.flow(expr, field_bound)?;
+            }
+            let array = engine.array(field_type, len, *span);
+            Ok(array)
+        }
+        RepeatedArray(((value, rep), span)) => {
+            let (field_type, field_bound) = engine.var();
+            let expr = check_expr(engine, bindings, value)?;
+            engine.flow(expr, field_bound)?;
+            let rep = rep
+                .parse()
+                .map_err(|_| SyntaxError::new1("ValueError: length out of bounds", *span))?;
+            if rep <= 0 {
+                return Err(SyntaxError::new1(
+                    "ValueError: length must be greater than 0",
+                    *span,
+                ));
+            }
+            let array = engine.array(field_type, rep, *span);
+            Ok(array)
+        }
     }
 }
 
-fn check_let(
+fn check_let_def(
     engine: &mut TypeCheckerCore,
     bindings: &mut Bindings,
+    lhs: &ast::LetPattern,
     expr: &ast::Expr,
-) -> Result<Scheme> {
-    if let ast::Expr::FuncDef(..) = expr {
-        let saved_bindings = RefCell::new(Bindings {
-            m: bindings.m.clone(),
-            changes: Vec::new(),
-        });
-        let saved_expr = expr.clone();
-
-        let f: Rc<dyn Fn(&mut TypeCheckerCore) -> Result<Value>> = Rc::new(move |engine| {
-            check_expr(engine, &mut saved_bindings.borrow_mut(), &saved_expr)
-        });
-
-        f(engine)?;
-        Ok(Scheme::Poly(f))
-    } else {
-        let var_type = check_expr(engine, bindings, expr)?;
-        Ok(Scheme::Mono(var_type))
-    }
+) -> Result<()> {
+    let var_type = check_expr(engine, bindings, expr)?;
+    let bound = process_let_pattern(engine, bindings, lhs)?;
+    engine.flow(var_type, bound)?;
+    Ok(())
 }
-
-fn check_toplevel(
+pub fn check_toplevel(
     engine: &mut TypeCheckerCore,
     bindings: &mut Bindings,
     def: &ast::TopLevel,
@@ -531,18 +701,51 @@ fn check_toplevel(
     use ast::TopLevel::*;
     match def {
         Expr(expr) => Ok(check_expr(engine, bindings, expr)?),
-        LetDef(name, readability, type_, var_expr) => {
-            let var_scheme = check_let(engine, bindings, var_expr)?;
-            bindings.insert_scheme(name.clone(), var_scheme);
-            Ok(engine.null(Span(0))) // Span should be unreachable due to parser structure
+        LetDef(pattern, var_expr) => {
+            check_let_def(engine, bindings, pattern, var_expr)?;
+            Ok(engine.null(Span(0)))
         }
-        FuncDef(((name, arg_pattern, body), span)) => {
-            let (arg_bound, body_type) = bindings.in_child_scope(|bindings| {
-                let arg_bound = process_let_pattern(engine, bindings, arg_pattern)?;
+        FuncDef(((name, arg_pattern, retype, body), span)) => {
+            let (uses, body_type) = bindings.in_child_scope(|bindings| {
+                let mut argument_uses = Vec::new();
+                for ((name, type_), _span) in arg_pattern {
+                    let (type_v, type_u) = parse_type_signature(engine, type_)?;
+                    bindings.insert(name.clone(), type_v);
+                    argument_uses.push(type_u);
+                }
                 let body_type = check_toplevel(engine, bindings, body)?;
-                Ok((arg_bound, body_type))
+                Ok((argument_uses, body_type))
             })?;
-            Ok(engine.func(arg_bound, body_type, *span))
+            let (retype_value, retype_use) = parse_type_signature(engine, &retype.0)?;
+            bindings
+                .functions
+                .insert(name.clone(), engine.func(uses, retype_value, *span));
+            engine.flow(body_type, retype_use)?;
+            Ok(engine.null(Span(0)))
+        }
+        Block(block, ret_type) => {
+            for elem in block {
+                check_toplevel(engine, bindings, elem)?;
+            }
+            if let Some(ret_type) = ret_type {
+                check_expr(engine, bindings, &ret_type.0)
+            } else {
+                Ok(engine.null(Span(0)))
+            }
+        }
+        Assign((name, name_span), (value, _value_span)) => {
+            let Some(scheme) = bindings.get(name) else {
+                return Err(SyntaxError::new1(
+                    format!("NameError: Undefined variable {}", name),
+                    *name_span,
+                ));
+            };
+            let (val, use_) = engine.var();
+            engine.flow(*scheme, use_)?;
+            let value = check_expr(engine, bindings, value)?;
+            engine.flow(value, use_)?;
+            bindings.insert(name.clone(), val);
+            Ok(engine.null(Span(0)))
         }
     }
 }
@@ -577,5 +780,11 @@ impl TypeckState {
         // by removing them from the changes rollback list
         self.bindings.changes.clear();
         Ok(())
+    }
+}
+
+impl Default for TypeckState {
+    fn default() -> Self {
+        Self::new()
     }
 }

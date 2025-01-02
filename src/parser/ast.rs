@@ -41,10 +41,12 @@ pub enum UnOp {
     BitNot,
 }
 
+type SpannedType = Spanned<Box<TypeExpr>>;
+
 #[derive(Debug, Clone)]
 pub enum LetPattern {
-    Var(String),                                     // TODO
-    Record(Vec<(Spanned<String>, Box<LetPattern>)>), // TODO
+    Var((String, Option<Spanned<Readability>>, Option<SpannedType>)),
+    Record(Vec<(Spanned<String>, Option<SpannedType>, Box<LetPattern>)>),
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ pub enum MatchPattern {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::vec_box)]
 pub enum Expr {
     BinOp(Spanned<Box<Expr>>, Spanned<Box<Expr>>, Op, Span),
     UnOp(Spanned<Box<Expr>>, UnOp, Span),
@@ -84,35 +87,45 @@ pub enum TypeExpr {
         Vec<(Spanned<String>, Box<TypeExpr>)>,
         Span,
     ), // TODO
-    Func(Spanned<(Box<TypeExpr>, Box<TypeExpr>)>), // TODO
-    Ident(Spanned<String>),                        // TODO
-    Nullable(Box<TypeExpr>, Span),                 // TODO
+    Ident(Spanned<String>),        // TODO
+    Nullable(Box<TypeExpr>, Span), // TODO
     Record(
         Option<Box<TypeExpr>>,
         Vec<(Spanned<String>, Box<TypeExpr>)>,
         Span,
     ), // TODO
-    Ref(Box<TypeExpr>, Spanned<Readability>),      // TODO
-    TypeVar(Spanned<String>),                      // TODO
+    Ref(Box<TypeExpr>, Spanned<Readability>), // TODO
+    TypeVar(Spanned<String>),      // TODO
     Alias(Box<TypeExpr>, Spanned<String>),
+    BoundedInt(
+        Vec<(Option<Spanned<String>>, Option<Spanned<String>>)>,
+        Span,
+    ),
+    NonZero(SpannedType),
+    Array(Box<TypeExpr>, String, Span),
 }
 
 #[derive(Debug, Clone)]
 pub enum TopLevel {
     Expr(Box<Expr>),
     Block(Vec<TopLevel>, Option<Spanned<Box<Expr>>>),
-    LetDef(
-        String,
-        Option<Spanned<Readability>>,
-        Option<Spanned<Box<TypeExpr>>>,
-        Box<Expr>,
-    ),
+    LetDef(LetPattern, Box<Expr>),
     Assign(Spanned<String>, Spanned<Box<Expr>>),
     FuncDef(
         Spanned<(
             String,
-            Vec<Spanned<(String, Option<Box<TypeExpr>>)>>,
+            Vec<Spanned<(String, Box<TypeExpr>)>>,
+            SpannedType,
             Box<TopLevel>,
         )>,
     ),
+}
+
+impl Default for TopLevel {
+    fn default() -> Self {
+        TopLevel::Expr(Box::new(Expr::Literal(
+            Literal::Nil,
+            ("nil".to_string(), Span(0)),
+        )))
+    }
 }
