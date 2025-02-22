@@ -1,13 +1,20 @@
 use std::ops::RangeInclusive;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Set {
-    ranges: Vec<RangeInclusive<i64>>,
+    pub(crate) ranges: Vec<RangeInclusive<i64>>,
 }
 
 impl Set {
     pub fn new(base: RangeInclusive<i64>) -> Set {
         Set { ranges: vec![base] }
+    }
+
+    #[cfg(test)]
+    pub fn multi(bases: &[RangeInclusive<i64>]) -> Set {
+        Set {
+            ranges: bases.to_vec(),
+        }
     }
 
     pub fn empty() -> Set {
@@ -18,6 +25,21 @@ impl Set {
         for range in &other.ranges {
             self.insert_and_merge(range.clone())
         }
+    }
+
+    pub fn and(&mut self, other: &Set) {
+        let mut new_ranges = Vec::new();
+        for range in &self.ranges {
+            for other_range in &other.ranges {
+                if range.start() <= other_range.end() && range.end() >= other_range.start() {
+                    new_ranges.push(
+                        *range.start().max(other_range.start())
+                            ..=*range.end().min(other_range.end()),
+                    );
+                }
+            }
+        }
+        self.ranges = new_ranges;
     }
 
     pub fn insert_and_merge(&mut self, range: RangeInclusive<i64>) {
@@ -139,5 +161,27 @@ impl Set {
             .map(|r| *r.end())
             .max()
             .unwrap_or(i64::MAX)
+    }
+}
+
+impl PartialEq for Set {
+    fn eq(&self, other: &Self) -> bool {
+        if self.ranges == other.ranges {
+            return true;
+        }
+        if self.ranges.len() != other.ranges.len() {
+            return false;
+        }
+        for range in &self.ranges {
+            if !other.ranges.contains(range) {
+                return false;
+            }
+        }
+        for range in &other.ranges {
+            if !self.ranges.contains(range) {
+                return false;
+            }
+        }
+        true
     }
 }

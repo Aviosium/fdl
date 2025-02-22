@@ -7,12 +7,13 @@ use crate::parser::spans::{Span, SpannedError as TypeError};
 type ID = usize;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Value(ID);
+pub struct Value(pub(crate) ID);
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Use(ID);
 
 pub type LazyFlow = (Value, Use);
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VTypeHead {
     VBool,
@@ -45,6 +46,7 @@ pub enum VTypeHead {
     },
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UTypeHead {
     UBool,
@@ -118,7 +120,12 @@ fn check_heads(
             out.push((*ret1, *ret2));
             // flip the order since arguments are contravariant
             if arg1.len() != arg2.len() {
-                return Err(TypeError::new2("TypeError: Function called with invalid argument number\nNote: Arguments defined here", lhs.1, "And used here", rhs.1));
+                return Err(TypeError::new2(
+                    "TypeError: Function called with invalid argument number\nNote: Arguments defined here",
+                    lhs.1,
+                    "And used here",
+                    rhs.1
+                ));
             }
             for (arg2, arg1) in arg2.iter().zip(arg1) {
                 out.push((*arg2, *arg1));
@@ -143,7 +150,7 @@ fn check_heads(
                 Ok(())
             } else {
                 Err(TypeError::new2(
-                    format!("TypeError: Missing field {name}\nNote: Field is accessed here"),
+                    "TypeError: Missing field {name}\nNote: Field is accessed here",
                     rhs.1,
                     "But the record is defined without that field here.",
                     lhs.1,
@@ -170,7 +177,7 @@ fn check_heads(
                 Ok(())
             } else {
                 Err(TypeError::new2(
-                    format!("TypeError: Unhandled case {name}\nNote: Case originates here"),
+                    "TypeError: Unhandled case {name}\nNote: Case originates here",
                     lhs.1,
                     "But it is not handled here.",
                     rhs.1,
@@ -324,9 +331,12 @@ pub struct TypeCheckerCore {
 }
 impl TypeCheckerCore {
     pub fn new() -> Self {
+        let mut r: reachability::Reachability = Default::default();
+        let _ = r.add_node();
+        // entry 0 is a pseudo entry
         Self {
-            r: Default::default(),
-            types: Vec::new(),
+            r,
+            types: vec![TypeNode::Var],
         }
     }
 
@@ -385,6 +395,7 @@ impl TypeCheckerCore {
         let mut results = Vec::new();
         while let Some(id) = to_search.pop() {
             for edge in self.r.get_edge(id) {
+                assert_ne!(edge, &0, "Undefined variable");
                 visited.insert(*edge);
                 match &self.types[*edge] {
                     TypeNode::Var => to_search.push(*edge),
@@ -396,6 +407,7 @@ impl TypeCheckerCore {
     }
 
     pub fn get_value(&self, value: Value) -> Vec<VTypeHead> {
+        assert_ne!(value.0, 0, "Undefined variable");
         match &self.types[value.0] {
             TypeNode::Value((val, _)) => vec![val.clone()],
             TypeNode::Var => self
@@ -416,6 +428,7 @@ impl TypeCheckerCore {
     }
 
     pub fn get_use(&self, use_: Use) -> UTypeHead {
+        assert_ne!(use_.0, 0, "Undefined variable");
         match &self.types[use_.0] {
             TypeNode::Use((use_, _)) => use_.clone(),
             TypeNode::Var => UTypeHead::UNull,

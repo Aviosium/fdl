@@ -12,7 +12,7 @@ IntLiteral: String = {
 };
 SignedIntLiteral: String = {
     <IntLiteral>,
-    r"-(?:0|[1-9][0-9]*)" => String::from(<>),
+    "-" <IntLiteral> => format!("-{}", <>),
 };
 
 FloatLiteral: String =
@@ -28,8 +28,8 @@ Readability: ast::Readability = {
 
 Call: Box<ast::Expr> = {
     Spanned<("$" <Ident> "(" <SepList<Expr, ",">> ")")> => {
-        let ((what, args), span) = <>;
-        Box::new(ast::Expr::Call(what, args, span))
+        let ((name, args), span) = <>;
+        ast::create_expr(ast::ExprType::Call{name, args}, span)
     }
 }
 
@@ -50,7 +50,7 @@ Spanned<T>: spans::Spanned<T> = {
 LeftAssociative<Op,NextTier>: Box<ast::Expr> = {
     Spanned<(Spanned<LeftAssociative<Op,NextTier>> Op Spanned<NextTier>)> => {
         let ((lhs, op, rhs), span) = <>;
-        Box::new(ast::Expr::BinOp(lhs, rhs, op, span))
+        ast::create_expr(ast::ExprType::BinOp{lhs, rhs, op}, span)
     },
     NextTier,
 };
@@ -104,38 +104,48 @@ OrOp: ast::Op = {
 };
 
 VarOrLiteral: Box<ast::Expr> = {
-    Spanned<Ident> => Box::new(
+    Spanned<Ident> => {
         match <>.0.as_str() {
-            "false" | "true" => ast::Expr::Literal(ast::Literal::Bool, <>),
-            "nil" => ast::Expr::Literal(ast::Literal::Nil, <>),
-            _ => ast::Expr::Variable(<>)
+            "false" | "true" => ast::create_expr(ast::ExprType::Literal{type_: ast::Literal::Bool, value: <>.0}, <>.1),
+            "nil" => ast::create_expr(ast::ExprType::Literal{type_: ast::Literal::Nil, value: <>.0}, <>.1),
+            _ => ast::create_expr(ast::ExprType::Variable(<>.0), <>.1),
         }
-    ),
+    },
 
-    Spanned<IntLiteral> => Box::new(ast::Expr::Literal(ast::Literal::Int, <>)),
-    Spanned<FloatLiteral> => Box::new(ast::Expr::Literal(ast::Literal::Float, <>)),
+    Spanned<IntLiteral> => {
+        ast::create_expr(ast::ExprType::Literal{type_: ast::Literal::Int, value: <>.0}, <>.1)
+    },
+    Spanned<FloatLiteral> => {
+        ast::create_expr(ast::ExprType::Literal{type_: ast::Literal::Float, value: <>.0}, <>.1)
+    },
 }
 
 LiteralArray: Box<ast::Expr> = {
-    Spanned<("[" <SepList<Expr, ",">> "]")> => Box::new(ast::Expr::LiteralArray(<>))
+    Spanned<("[" <SepList<Expr, ",">> "]")> => ast::create_expr(ast::ExprType::LiteralArray(<>.0), <>.1)
 };
 
 RepeatedArray: Box<ast::Expr> = {
-    Spanned<("[" <Expr> ";" <IntLiteral> "]")> => Box::new(ast::Expr::RepeatedArray(<>))
+    Spanned<("[" <Expr> ";" <IntLiteral> "]")> => ast::create_expr(ast::ExprType::RepeatedArray(<>.0.0, <>.0.1), <>.1)
 };
 
 ArrayAccess: Box<ast::Expr> = {
-    <lhs: SimpleExpr> <rhs: Spanned<("[" <Expr> "]")>> => Box::new(ast::Expr::ArrayAccess(lhs, rhs.0, rhs.1))
+    <Spanned<(<SimpleExpr> "[" <Expr> "]")>> => {
+        let ((array, idx), span) = <>;
+        ast::create_expr(ast::ExprType::ArrayAccess{array, idx}, span)
+    },
 };
 
 RecordSub = "{" <SepList<(<Spanned<Ident>> "=" <Expr>), ",">> "}";
 
 RecordDef: Box<ast::Expr> = {
-    Spanned<RecordSub> => Box::new(ast::Expr::Record(<>.0, <>.1))
+    Spanned<RecordSub> => ast::create_expr(ast::ExprType::Record(<>.0), <>.1),
 };
 
 FieldAccess: Box<ast::Expr> = {
-    <lhs: SimpleExpr> <rhs: Spanned<("." <Ident>)>> => Box::new(ast::Expr::FieldAccess(lhs, rhs.0, rhs.1))
+    <Spanned<(<SimpleExpr> "." <Ident>)>> => {
+        let ((obj, field), span) = <>;
+        ast::create_expr(ast::ExprType::FieldAccess{obj, field}, span)
+    },
 };
 
 SimpleExpr = {
@@ -156,14 +166,14 @@ CallExpr = {
 PotExpr: Box<ast::Expr> = {
     Spanned<(Spanned<CallExpr> PotOp Spanned<PotExpr>)> => {
         let ((lhs, op, rhs), span) = <>;
-        Box::new(ast::Expr::BinOp(lhs, rhs, op, span))
+        ast::create_expr(ast::ExprType::BinOp{lhs, rhs, op}, span)
     },
     CallExpr,
 };
 UnaryExpr: Box<ast::Expr> = {
     Spanned<(UnOp Spanned<UnaryExpr>)> => {
         let ((op, expr), span) = <>;
-        Box::new(ast::Expr::UnOp(expr, op, span))
+        ast::create_expr(ast::ExprType::UnOp{expr, op}, span)
     },
     PotExpr,
 };
@@ -204,8 +214,14 @@ TypeExpr: Box<ast::TypeExpr> = {
 };
 
 CoreIf: Box<ast::Expr> = {
-    <t:Spanned<Expr>> "then" <b:Block> "elseif" <e:CoreIf> => Box::new(ast::Expr::If(t, b, Some(ast::TopLevel::Expr(e)))),
-    <Spanned<Expr>> "then" <Block> <("else" <Block>)?> "end" => Box::new(ast::Expr::If(<>)),
+    <Spanned<(<Expr> "then" <Block> "elseif" <CoreIf>)>> => {
+        let ((cond, block, else_), span) = <>;
+        ast::create_expr(ast::ExprType::If{cond, block, else_: Some(ast::TopLevel::Expr(else_))}, span)
+    },
+    <Spanned<(<Expr> "then" <Block> <("else" <Block>)?> "end")>> => {
+        let ((cond, block, else_), span) = <>;
+        ast::create_expr(ast::ExprType::If{cond, block, else_}, span)
+    },
 };
 
 If: Box<ast::Expr> = {

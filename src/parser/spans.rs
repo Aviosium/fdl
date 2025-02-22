@@ -14,6 +14,9 @@ pub struct SpanManager {
     spans: Vec<(usize, usize, usize)>,
 }
 
+const LINE_PATTERN: &str = "  \x1b[1;94m|\x1b[0m ";
+const LINE_PATTERN_LEN: usize = 4; // length without formatting
+
 impl SpanManager {
     pub fn add_source(&mut self, source: String) -> SpanMaker {
         let i = self.sources.len();
@@ -47,21 +50,24 @@ impl SpanManager {
         // Lines before the span
         if let Some(line) = b_iter.next() {
             if let Some(line) = b_iter.next() {
+                out += LINE_PATTERN;
                 out += line;
                 out += "\n";
             }
+            out += LINE_PATTERN;
             out += line;
             out += "\n";
         }
 
         // Line of the span
+        out += LINE_PATTERN;
         out += line_before;
         out += tok;
         out += line_after;
         out += "\n";
 
         // highlight line
-        out += &" ".repeat(line_before.len());
+        out += &" ".repeat(line_before.len() + LINE_PATTERN_LEN);
         out += "\x1b[1;31m^\x1b[1;33m";
         out += &"~".repeat(std::cmp::max(1, tok.len()) - 1);
         out += "\x1b[0m";
@@ -71,12 +77,20 @@ impl SpanManager {
         // Lines after the span
         for _ in 0..2 {
             if let Some(line) = a_iter.next() {
+                out += LINE_PATTERN;
                 out += line;
                 out += "\n";
             }
         }
 
         out
+    }
+
+    /// Get the source, left and right markers of a span
+    pub fn get_characters(&self, span: Span) -> (String, usize, usize) {
+        let (source_ind, l, r) = self.spans[span.0];
+        let source = &self.sources[source_ind];
+        (source.to_string(), l, r)
     }
 
     fn new_span(&mut self, source_ind: usize, l: usize, r: usize) -> Span {
@@ -93,7 +107,7 @@ pub struct SpanMaker<'a> {
     pool: HashMap<(usize, usize), Span>,
 }
 
-impl<'a> SpanMaker<'a> {
+impl SpanMaker<'_> {
     pub fn span(&mut self, l: usize, r: usize) -> Span {
         // Make the borrow checker happy
         let source_ind = self.source_ind;
@@ -143,6 +157,14 @@ impl SpannedError {
             out += &sm.print(*span);
         }
         out
+    }
+
+    /// Get the resolved error messages with the source code
+    pub fn get_resolved(&self, sm: &SpanManager) -> Vec<(String, (String, usize, usize))> {
+        self.pairs
+            .iter()
+            .map(|(msg, span)| (msg.clone(), sm.get_characters(*span)))
+            .collect()
     }
 }
 impl fmt::Display for SpannedError {

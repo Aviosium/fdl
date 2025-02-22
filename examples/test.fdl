@@ -1,4 +1,5 @@
 function $test(b: bounded<0..10>, c: nonzero<2..2>) -> bounded<0..5>
+    -- Type is optional in this position
     let b: [[bounded<0..10>; 5]; 2] = [[b;5];2];
     b[0][8//2]//c
 end;
@@ -28,13 +29,40 @@ function $use_obj() -> int
 end;
 
 function $test_len(a: _) -> bounded<0..6>
-    let b = [nil;6];
+    let b = [a;6];
     #b
 end;
 
 function $testt() -> int?
 end;
 
+function $null_check(a: int?) -> int
+    if a ~= nil then
+        a
+    else
+        -1
+    end
+end;
+
+function $stuff_inside_null_check(a: int?) -> int?
+    do
+        let b: int? = a;
+    end;
+    a
+end;
+
+function $test_add(a: bounded<0..10>, b: bounded<5..10>) -> bounded<5..20>
+    a + b
+end;
+
+function $test_if_type(a: int) -> bounded<0..12>
+    if (a >= 0 and a <= 10) or a == 12 then
+        a
+    else
+        0
+    end
+end;
+
 function $main() -> int
-    $test(1, 2)
+    $test($test_len(true), 2)
 end

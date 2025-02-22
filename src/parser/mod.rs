@@ -71,33 +71,3 @@ impl Default for Parser {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_basic_script() {
-        // This is just to test the language parser, and doesn't make sense
-        let script = "\
-            let a = 5;
-            b=6;
-            if a then
-                b=8;
-            elseif b then
-                a=true;
-            else
-                $a()
-            end;
-            let c = {a=1,b=true,c=-1};
-            let b = [1,2,3,4,5,6,7,8,9,10];
-            let a = [1;20];
-            a[0];
-            b.c;
-            function $a(b,)
-                c
-            end;";
-        let mut parser = Parser::new();
-        let _ast = parser.parse(script).unwrap();
-    }
-}

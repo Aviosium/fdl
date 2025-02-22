@@ -2,7 +2,7 @@
 name = "fdl"
 description = "Fast deterministic language"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0"
 repository = "https://github.com/Aviosium/fdl"
 build = "build.rs"
