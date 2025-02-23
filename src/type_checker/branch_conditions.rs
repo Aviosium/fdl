@@ -124,19 +124,15 @@ fn combine_and(
 
 fn combine_or(
     target: &mut HashMap<String, Condition>,
-    source: HashMap<String, Condition>,
+    mut source: HashMap<String, Condition>,
     span: Span,
 ) {
     for (key, value) in target.iter_mut() {
-        if !source.contains_key(key) {
-            value.range = None;
-        }
-    }
-    for (key, value) in source {
-        if let Some(existing) = target.get_mut(&key) {
-            existing.or(value, span);
+        if let Some(other) = source.remove(key) {
+            value.or(other, span);
         } else {
-            target.insert(key, value);
+            value.range = None;
+            value.not_null = NotNull::Undecided;
         }
     }
 }

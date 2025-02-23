@@ -856,7 +856,34 @@ impl Default for TypeckState {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::RangeInclusive;
+
     use super::*;
+
+    fn simplify_values(values: Vec<VTypeHead>) -> Vec<VTypeHead> {
+        let mut result = Vec::new();
+        let mut combined: Option<Set> = None;
+        for value in values {
+            match value {
+                VTypeHead::VBoundedInt { set } => {
+                    if let Some(combined) = &mut combined {
+                        combined.merge(&set);
+                    } else {
+                        combined = Some(set);
+                    }
+                }
+                _ => {
+                    if !result.contains(&value) {
+                        result.push(value);
+                    }
+                }
+            }
+        }
+        if let Some(combined) = combined {
+            result.push(VTypeHead::VBoundedInt { set: combined });
+        }
+        result
+    }
 
     fn run_checker(inputs: &str, conv: &str) -> Vec<VTypeHead> {
         let mut parser = crate::parser::Parser::new();
@@ -881,7 +908,23 @@ mod tests {
         } else {
             panic!("Invalid ast");
         };
-        typecheck.core.get_value(retype.type_)
+        simplify_values(typecheck.core.get_value(retype.type_))
+    }
+
+    fn get_set(min: i64, max: i64) -> VTypeHead {
+        VTypeHead::VBoundedInt {
+            set: Set::new(min..=max),
+        }
+    }
+
+    fn get_set_multi(ranges: &[RangeInclusive<i64>]) -> VTypeHead {
+        VTypeHead::VBoundedInt {
+            set: Set::multi(ranges),
+        }
+    }
+
+    fn get_full_set() -> VTypeHead {
+        get_set(i64::MIN, i64::MAX)
     }
 
     fn run_checker_single(inputs: &str, conv: &str) -> VTypeHead {
@@ -903,18 +946,14 @@ mod tests {
     fn test_bounded() {
         assert_eq!(
             run_checker_single("a: bounded<0..10>, b: bounded<5..10>", "a + b"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(5..=20)
-            }
+            get_set(5, 20)
         );
         assert_eq!(
             run_checker_single(
                 "a: bounded<0..2, 5..7>, b: bounded<10..12, 25..27>",
                 "a + b"
             ),
-            VTypeHead::VBoundedInt {
-                set: Set::new(10..=34)
-            }
+            get_set(10, 34)
         );
     }
 
@@ -922,9 +961,7 @@ mod tests {
     fn test_null_check() {
         assert_eq!(
             run_checker_single("a: int?", "if a ~= nil then a else 0 end"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(i64::MIN..=i64::MAX)
-            }
+            get_full_set()
         );
         assert_eq!(
             run_checker_single("a: int?", "if a ~= nil then nil else a end"),
@@ -936,15 +973,11 @@ mod tests {
     fn test_simple_int_constraint() {
         assert_eq!(
             run_checker_single("a: int", "if a > 0 then a else 1 end"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(1..=i64::MAX)
-            }
+            get_set(1, i64::MAX)
         );
         assert_eq!(
             run_checker_single("a: int", "if a < 0 then a else -1 end"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(i64::MIN..=-1)
-            }
+            get_set(i64::MIN, -1)
         );
     }
 
@@ -955,9 +988,7 @@ mod tests {
                 "a:int",
                 "if a >= 0 and a <= 10 or a == 12 then a else 0 end"
             ),
-            VTypeHead::VBoundedInt {
-                set: Set::multi(&[0..=10, 12..=12])
-            }
+            get_set_multi(&[0..=10, 12..=12])
         );
     }
 
@@ -968,9 +999,7 @@ mod tests {
                 "a:int",
                 "if a >= 0 and a <= 10 or a == 12 then -1 else a end"
             ),
-            VTypeHead::VBoundedInt {
-                set: Set::multi(&[i64::MIN..=-1, 11..=11, 13..=i64::MAX])
-            }
+            get_set_multi(&[i64::MIN..=-1, 11..=11, 13..=i64::MAX])
         );
     }
 
@@ -978,19 +1007,74 @@ mod tests {
     fn test_int_and_null_conditions() {
         assert_eq!(
             run_checker_single("a: int?", "if a ~= nil and a >= 0 then a else 0 end"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(0..=i64::MAX)
-            }
+            get_set(0, i64::MAX)
         )
+    }
+
+    #[test]
+    fn test_not_null_check_or() {
+        assert_eq!(
+            run_checker(
+                "a: int?, b: int?",
+                "if a ~= nil or b ~= nil then a else 0 end"
+            ),
+            vec![VTypeHead::VNull, get_full_set()]
+        );
+    }
+
+    #[test]
+    fn test_not_null_check_or_else() {
+        assert_eq!(
+            run_checker(
+                "a: int?, b: int?",
+                "if a ~= nil or b ~= nil then nil else a end"
+            ),
+            vec![VTypeHead::VNull]
+        );
     }
 
     #[test]
     fn test_complex_conditions() {
         assert_eq!(
             run_checker_single("a: int, b: int?", "if a >= 0 or b ~= nil then a else 0 end"),
-            VTypeHead::VBoundedInt {
-                set: Set::new(i64::MIN..=i64::MAX)
-            }
+            get_full_set()
+        );
+    }
+
+    #[test]
+    fn test_comparison() {
+        let inputs: &str = "a: int, b: bounded<5..10>";
+        assert_eq!(
+            run_checker_single(inputs, "if a > b then a else 100 end"),
+            get_set(6, i64::MAX)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a > b then -100 else a end"),
+            get_set(i64::MIN, 10)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a < b then a else -100 end"),
+            get_set(i64::MIN, 9)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a < b then 100 else a end"),
+            get_set(5, i64::MAX)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a >= b then a else 100 end"),
+            get_set(5, i64::MAX)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a >= b then -100 else a end"),
+            get_set(i64::MIN, 9)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a <= b then a else -100 end"),
+            get_set(i64::MIN, 10)
+        );
+        assert_eq!(
+            run_checker_single(inputs, "if a <= b then 100 else a end"),
+            get_set(6, i64::MAX)
         );
     }
 }
