@@ -359,10 +359,12 @@ impl TypeCheckerCore {
         Ok(())
     }
 
+    #[allow(dead_code)] // todo: remove
     pub fn debug_value(&self, value: &Value) {
         println!("Type of {value:?}: {:?}", self.types[value.0])
     }
 
+    #[allow(dead_code)] // todo: remove
     pub fn debug_use(&self, use_: &Use) {
         println!("Type of {use_:?}: {:?}", self.types[use_.0])
     }

@@ -50,6 +50,7 @@ pub enum LetPattern {
     Record(Vec<(Spanned<String>, Option<SpannedType>, Box<LetPattern>)>),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum MatchPattern {
     Case(String, String), // TODO
