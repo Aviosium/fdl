@@ -1,3 +1,5 @@
+
+# This project has been discontinued in favor of roto (https://github.com/NLnetLabs/roto)
 # fdl
 ## Fast Deterministic Language
 
